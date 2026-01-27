@@ -1,0 +1,282 @@
+# Description: Override file with optimizations for 64GB RAM / 16-core / 1TB NVMe RAID 1
+#
+# This file automatically applies when running docker-compose commands.
+# To use the base config without overrides: docker-compose -f docker-compose.yml up
+#
+# Hardware context: User has 4x the recommended RAM (64GB vs 16GB recommended)
+# Strategy: Scale conservatively at 2-3x defaults, leaving room for OS file cache
+# which is critical for database performance on large datasets
+
+services:
+  db:
+    # PostgreSQL configuration optimized for 64GB RAM / 16-core / NVMe
+    command: >-
+      postgres
+      -c shared_buffers=8GB
+      -c effective_cache_size=40GB
+      -c maintenance_work_mem=2GB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=500
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=64MB
+      -c min_wal_size=2GB
+      -c max_wal_size=8GB
+      -c max_worker_processes=16
+      -c max_parallel_workers_per_gather=4
+      -c max_parallel_workers=16
+      -c max_parallel_maintenance_workers=4
+      -c shared_preload_libraries='pg_amqp.so,pg_prewarm'
+      -c pg_prewarm.autoprewarm=true
+      -c pg_prewarm.autoprewarm_interval=300
+
+    # Explanation of key PostgreSQL settings:
+    #
+    # shared_buffers=8GB (was 2GB, now 4x)
+    #   - Main PostgreSQL memory cache for frequently accessed data
+    #   - Set to ~12% of total RAM (conservative for large RAM systems)
+    #   - Rule: 25% for ≤32GB RAM, 10-15% for >32GB (let OS cache do more)
+    #
+    # effective_cache_size=40GB
+    #   - Tells query planner how much RAM available for caching (Postgres + OS)
+    #   - Set to ~62% of total RAM
+    #   - Helps planner choose between index scans vs sequential scans
+    #
+    # maintenance_work_mem=2GB
+    #   - Memory for VACUUM, CREATE INDEX, ALTER TABLE operations
+    #   - Speeds up index creation and maintenance significantly
+    #   - Can be set up to 2GB safely for large databases
+    #
+    # checkpoint_completion_target=0.9
+    #   - Spread checkpoint I/O over 90% of interval
+    #   - Reduces I/O spikes that cause query latency
+    #
+    # wal_buffers=16MB
+    #   - Write-Ahead Log buffer (auto-sized to ~1/32 of shared_buffers)
+    #   - 16MB is good for high-write workloads
+    #
+    # default_statistics_target=500
+    #   - Statistics collected for query planning (default: 100)
+    #   - Higher = better plans for complex queries (MusicBrainz has very complex schema)
+    #   - Increases ANALYZE time but improves query performance
+    #
+    # random_page_cost=1.1 (default: 4.0)
+    #   - Cost of random page read vs sequential (assumes spinning disk)
+    #   - NVMe is nearly as fast random as sequential, so set close to 1.0
+    #   - Makes planner prefer index scans on fast storage
+    #
+    # effective_io_concurrency=200 (default: 1)
+    #   - Expected concurrent disk I/O operations
+    #   - NVMe RAID 1 can handle hundreds of concurrent ops
+    #   - Enables parallel bitmap heap scans
+    #
+    # work_mem=64MB (default: 4MB)
+    #   - Memory per query operation (sort, hash join, etc.)
+    #   - Formula: (Available RAM * 0.25) / (max_connections * 2-3)
+    #   - With ~20GB for queries and default 100 connections: ~100MB is safe
+    #   - Conservative 64MB prevents OOM on many simultaneous complex queries
+    #
+    # min_wal_size=2GB, max_wal_size=8GB (defaults: 80MB, 1GB)
+    #   - Controls WAL size and checkpoint frequency
+    #   - Larger = fewer checkpoints = less I/O spikes
+    #   - With 1TB storage, 8GB is negligible
+    #
+    # max_worker_processes=16
+    #   - Background worker pool (set to CPU core count)
+    #
+    # max_parallel_workers_per_gather=4 (default: 2)
+    #   - Workers per parallel query node
+    #   - With 16 cores, 4 workers per query is reasonable
+    #   - Speeds up large aggregations and scans
+    #
+    # max_parallel_workers=16
+    #   - Total parallel workers across all queries
+    #   - Allows 4 queries to run with 4 workers each, or many with fewer
+    #
+    # max_parallel_maintenance_workers=4
+    #   - Parallel index creation and VACUUM
+    #   - Significantly speeds up CREATE INDEX on large tables
+    #
+    # shared_preload_libraries='pg_amqp.so,pg_prewarm'
+    #   - pg_amqp: Required by MusicBrainz for message queue integration
+    #   - pg_prewarm: Cache warming extension for loading tables/indexes into memory
+    #
+    # pg_prewarm.autoprewarm=true
+    #   - Automatically saves buffer cache contents on shutdown
+    #   - Restores cache on restart (speeds up recovery from restarts)
+    #   - Saves to $PGDATA/autoprewarm.blocks file every 5 minutes
+    #
+    # pg_prewarm.autoprewarm_interval=300
+    #   - How often (in seconds) to save cache state
+    #   - 300 = 5 minutes (default)
+    #   - Lower = more frequent saves but higher I/O overhead
+
+    shm_size: "8GB"
+    # ↑ Shared memory must be >= shared_buffers
+    # Used for parallel sorts and hash joins
+    # Without enough shm, you get "out of shared memory" errors
+
+  musicbrainz:
+    # Remove direct port exposure - only accessible via nginx
+    ports: !override
+      - 99
+
+    environment:
+      - MUSICBRAINZ_SERVER_PROCESSES=24
+      # ↑ Plackup worker processes (increased from default 10)
+      # Each process handles one HTTP request at a time
+      # Formula: CPU_cores * 1.5 to 2.5 (depending on I/O vs CPU workload)
+      # MusicBrainz is I/O-bound (waiting on database queries)
+      # With 16 cores: 24 processes = 1.5 processes per core
+      # This provides good concurrency without excessive context switching
+      # Each process uses ~150-250MB RAM, so 24 * 200MB ≈ 5GB
+
+      # Nginx-proxy configuration
+      # These environment variables are read by nginx-proxy and acme-companion containers
+      # via Docker socket to automatically configure reverse proxy and SSL certificates
+      - VIRTUAL_HOST=${MUSICBRAINZ_DOMAIN:-musicbrainz.local}
+      # ↑ Tells nginx-proxy which domain(s) to route to this container
+      - VIRTUAL_PORT=5000
+      # ↑ Tells nginx-proxy which port inside the container to proxy to
+      - LETSENCRYPT_HOST=${MUSICBRAINZ_DOMAIN:-musicbrainz.local}
+      # ↑ Tells acme-companion to request Let's Encrypt SSL certificate for this domain
+      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-admin@example.com}
+      # ↑ Email for Let's Encrypt certificate expiration notifications
+      - REPLICATION_TYPE=RT_SLAVE
+      # ↑ Tells MusicBrainz server this is a mirror, not the main server
+
+  search:
+    environment:
+      - SOLR_HEAP=8g
+      # ↑ Java heap for Solr (increased from 2g to 8g = 4x default)
+      # Solr keeps search indexes in Java heap for fast lookups
+      # Rule: Set heap to 50-75% of container RAM allocation
+      # With 12GB allocated to container: 8GB heap + 4GB for OS file cache
+      #
+      # Why not more?
+      # - Java heap >31GB loses compressed pointers (huge performance hit)
+      # - Leaving RAM outside heap for OS cache is critical for Lucene
+      # - Lucene indexes are mmap'd files - OS cache is often faster than heap
+      #
+      # Why 8GB specifically?
+      # - MusicBrainz full database = ~40GB indexes uncompressed
+      # - Hot data (frequently searched artists/releases) fits in 8GB
+      # - Cold data served from OS file cache (the other 4GB + system cache)
+
+      - LOG4J_FORMAT_MSG_NO_LOOKUPS=true
+      # ↑ Security mitigation for Log4Shell vulnerability (CVE-2021-44228)
+
+    mem_swappiness: 0
+    # ↑ Never swap Solr memory to disk (changed from 1 to 0)
+    # Swapping Java heap is catastrophic for performance:
+    # - JVM garbage collector assumes memory is fast
+    # - Page faults during GC cause massive pauses (seconds to minutes)
+    # - Can cause cascading failures and OOM errors
+    # With 64GB RAM, swapping should never happen anyway
+
+  redis:
+    image: redis:7-alpine
+    # ↑ Updated from redis:3 (released 2015, EOL)
+    # Redis 7 benefits:
+    # - Better memory efficiency
+    # - Improved eviction algorithms
+    # - Functions and triggers
+    # - Security improvements
+
+    command: redis-server --maxmemory 2gb --maxmemory-policy allkeys-lru --save ""
+    # ↑ Redis configuration for session cache:
+    #
+    # --maxmemory 2gb
+    #   - Hard memory limit (prevents unbounded growth)
+    #   - 2GB is generous for session storage
+    #   - MusicBrainz uses Redis for user sessions and rate limiting
+    #
+    # --maxmemory-policy allkeys-lru
+    #   - When memory full: evict Least Recently Used keys
+    #   - Good for pure cache (all keys are cache, none are critical data)
+    #   - Alternative "volatile-lru" only evicts keys with TTL set
+    #
+    # --save ""
+    #   - Disable RDB persistence (no disk snapshots)
+    #   - Safe because Redis is used as cache, not primary storage
+    #   - Sessions stored in Redis are temporary anyway
+    #   - Reduces disk I/O and eliminates "BGSAVE" pauses
+    #   - If Redis crashes, users just need to log in again (acceptable)
+
+  # ============================================================================
+  # HTTPS/SSL Configuration with Nginx Reverse Proxy and Let's Encrypt
+  # ============================================================================
+
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy:latest
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      # ↑ Docker socket access to auto-discover containers
+      - nginx-certs:/etc/nginx/certs:ro
+      # ↑ SSL certificates (read-only, managed by acme-companion)
+      - nginx-vhost:/etc/nginx/vhost.d
+      # ↑ Virtual host configurations
+      - nginx-html:/usr/share/nginx/html
+      # ↑ Web root for ACME challenges and default pages
+      - nginx-dhparam:/etc/nginx/dhparam
+      # ↑ Diffie-Hellman parameters for stronger SSL
+      - ./local/config/nginx/custom.conf:/etc/nginx/conf.d/custom.conf:ro
+      # ↑ Custom nginx configuration for gzip compression
+    environment:
+      - DEFAULT_HOST=${MUSICBRAINZ_DOMAIN:-musicbrainz.local}
+      # ↑ Default virtual host to serve
+      - ENABLE_IPV6=true
+      # ↑ Enable IPv6 support
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "10"
+    labels:
+      - "com.github.jrcs.letsencrypt_nginx_proxy_companion.nginx_proxy"
+      # ↑ Label for acme-companion to identify the nginx-proxy container
+
+  acme-companion:
+    image: nginxproxy/acme-companion:latest
+    container_name: acme-companion
+    restart: unless-stopped
+    depends_on:
+      - nginx-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # ↑ Docker socket access to monitor containers
+      - nginx-certs:/etc/nginx/certs
+      # ↑ SSL certificates (read-write, this container manages them)
+      - nginx-vhost:/etc/nginx/vhost.d
+      # ↑ Virtual host configurations for ACME challenges
+      - nginx-html:/usr/share/nginx/html
+      # ↑ Web root for ACME HTTP-01 challenges
+      - acme-state:/etc/acme.sh
+      # ↑ acme.sh state and account data
+    environment:
+      - DEFAULT_EMAIL=${LETSENCRYPT_EMAIL:-admin@example.com}
+      # ↑ Default email for Let's Encrypt notifications
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "10"
+
+# Additional volumes for nginx and SSL certificates
+volumes:
+  nginx-certs:
+    driver: local
+  nginx-vhost:
+    driver: local
+  nginx-html:
+    driver: local
+  nginx-dhparam:
+    driver: local
+  acme-state:
+    driver: local
