@@ -18,7 +18,7 @@ This setup creates a complete MusicBrainz mirror that:
 - **Domain name** with DNS pointing to your server
 - **Ports 80 and 443** open and available
 - **Hardware**: Minimum 16GB RAM, recommended 64GB+ for optimal performance
-- **Storage**: ~100GB minimum, SSD/NVMe strongly recommended
+- **Storage**: ~400GB minimum, SSD/NVMe strongly recommended
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ Download or copy this entire `local` folder into the `musicbrainz-docker` direct
 cp -r /path/to/this/local ./local
 
 # Option B: If this is hosted in a separate git repo
-git clone <this-repo-url> local
+git clone https://github.com/OpenHomeFoundation/musicbrainz-docker-local local
 ```
 
 Your directory structure should look like:
