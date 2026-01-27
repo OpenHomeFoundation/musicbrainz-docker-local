@@ -90,6 +90,11 @@ echo "Step 2: Downloading OHF configuration"
 echo "================================================="
 echo ""
 
+# Remove existing local folder (official repo has an empty one)
+if [ -d "local" ]; then
+    rm -rf local
+fi
+
 git clone "$OHF_LOCAL_REPO" local
 echo -e "${GREEN}✓${NC} Downloaded OHF local configuration"
 
