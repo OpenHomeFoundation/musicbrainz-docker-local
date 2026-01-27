@@ -90,6 +90,8 @@ echo "Step 2: Downloading OHF configuration"
 echo "================================================="
 echo ""
 
+cd "$INSTALL_DIR"
+
 # Remove existing local folder (official repo has an empty one)
 if [ -d "local" ]; then
     rm -rf local
@@ -157,34 +159,39 @@ echo "      └── config/"
 echo ""
 
 # Ask to run install script
-echo "The install script will:"
+echo "The install script (for Ubuntu servers) will:"
 echo "  - Configure UFW firewall"
 echo "  - Apply system optimizations"
 echo "  - Optionally start services"
 echo ""
-read -p "Run the installation script now? (requires sudo) (y/n) " -n 1 -r
+echo -e "${YELLOW}Note: install.sh is designed for Ubuntu servers.${NC}"
+echo "If you're setting this up locally to deploy elsewhere, skip this step."
+echo ""
+read -p "Run the installation script now? (requires sudo, Ubuntu only) (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     echo ""
     sudo "$INSTALL_DIR/local/install.sh"
-else
-    echo ""
-    echo "To complete setup manually:"
-    echo ""
-    echo "  1. Ensure DNS A record points $DOMAIN to this server"
-    echo ""
-    echo "  2. Run the installation script:"
-    echo "     cd $INSTALL_DIR"
-    echo "     sudo ./local/install.sh"
-    echo ""
-    echo "  3. Or start services directly:"
-    echo "     cd $INSTALL_DIR"
-    echo "     docker compose up -d"
-    echo ""
-    echo "  4. Monitor certificate generation:"
-    echo "     docker logs acme-companion -f"
-    echo ""
 fi
+
+echo ""
+echo "================================================="
+echo "Next Steps"
+echo "================================================="
+echo ""
+echo "1. Ensure DNS A record points $DOMAIN to your server"
+echo ""
+echo "2. If deploying to a remote Ubuntu server, copy the files and run:"
+echo "   cd $INSTALL_DIR"
+echo "   sudo ./local/install.sh"
+echo ""
+echo "3. Or start services directly (skip install.sh for non-Ubuntu):"
+echo "   cd $INSTALL_DIR"
+echo "   docker compose up -d"
+echo ""
+echo "4. Monitor certificate generation:"
+echo "   docker logs acme-companion -f"
+echo ""
 
 echo "For documentation, see:"
 echo "  - $INSTALL_DIR/local/README.md"
