@@ -20,7 +20,30 @@ This setup creates a complete MusicBrainz mirror that:
 - **Hardware**: Minimum 16GB RAM, recommended 64GB+ for optimal performance
 - **Storage**: ~400GB minimum, SSD/NVMe strongly recommended
 
-## Quick Start
+## Automated Install (Recommended)
+
+Run this single command to set up everything automatically:
+
+```bash
+# Using curl
+curl -fsSL https://raw.githubusercontent.com/OpenHomeFoundation/musicbrainz-docker-local/main/bootstrap.sh | bash
+
+# Or using wget
+wget -qO- https://raw.githubusercontent.com/OpenHomeFoundation/musicbrainz-docker-local/main/bootstrap.sh | bash
+```
+
+The bootstrap script will:
+- Clone the official musicbrainz-docker repository
+- Download this OHF configuration
+- Prompt for your domain and email
+- Create the `.env` file
+- Optionally run the installation script
+
+---
+
+## Manual Install
+
+If you prefer to set things up manually, follow these steps:
 
 ### 1. Clone the Official MusicBrainz Docker Repository
 
