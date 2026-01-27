@@ -315,8 +315,12 @@ docker compose exec -T db psql -U musicbrainz musicbrainz_db < backup.sql
 
 For local development without HTTPS, you can bypass nginx-proxy:
 
-1. Comment out nginx-proxy and acme-companion in `docker-compose.ohf.yml`
-2. Uncomment the ports section for musicbrainz to expose port 5000 directly
+1. Comment the ports section for musicbrainz to expose port 5000 directly
+2. Restart services:
+   ```bash
+   docker compose down
+   docker compose up -d
+   ```
 3. Access via `http://localhost:5000`
 
 ## Additional Resources
