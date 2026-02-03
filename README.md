@@ -1,361 +1,419 @@
-# MusicBrainz Docker - Local Configuration
+# MusicBrainz Mirror Setup Guide
+## Open Home Foundation - Music Assistant Project
 
-This folder contains custom configuration for deploying a production-ready MusicBrainz mirror with automatic HTTPS via Let's Encrypt.
+Complete setup guide for deploying a production-ready MusicBrainz mirror.
 
 **Important:** This `local` folder must be placed inside the official [musicbrainz-docker](https://github.com/metabrainz/musicbrainz-docker) repository.
 
-## Overview
+---
 
-This setup creates a complete MusicBrainz mirror that:
-- Replicates the full MusicBrainz database automatically
-- Provides HTTPS with auto-renewing Let's Encrypt certificates
-- Is optimized for high-performance hardware (64GB RAM / 16-core)
+## Table of Contents
 
-## Prerequisites
-
-- **Ubuntu Server** (22.04 LTS or newer recommended)
-- **Docker** and **Docker Compose** (v2+)
-- **Domain name** with DNS pointing to your server
-- **Ports 80 and 443** open and available
-- **Hardware**: Minimum 16GB RAM, recommended 64GB+ for optimal performance
-- **Storage**: ~400GB minimum, SSD/NVMe strongly recommended
-
-## Automated Install (Recommended)
-
-Run this single command to set up everything automatically:
-
-```bash
-# Using curl
-curl -fsSL https://raw.githubusercontent.com/OpenHomeFoundation/musicbrainz-docker-local/main/bootstrap.sh | bash
-
-# Or using wget
-wget -qO- https://raw.githubusercontent.com/OpenHomeFoundation/musicbrainz-docker-local/main/bootstrap.sh | bash
-```
-
-The bootstrap script will:
-- Clone the official musicbrainz-docker repository
-- Download this OHF configuration
-- Prompt for your domain and email
-- Create the `.env` file
-- Optionally run the installation script
+1. [Overview](#overview)
+2. [Hardware Requirements](#hardware-requirements)
+3. [Quick Start](#quick-start)
+4. [Server Preparation](#server-preparation)
+5. [Configuration](#configuration)
+6. [Deployment](#deployment)
+7. [Monitoring & Maintenance](#monitoring--maintenance)
+8. [Troubleshooting](#troubleshooting)
+9. [Backup & Recovery](#backup--recovery)
+10. [Updating](#updating)
 
 ---
 
-## Manual Install
+## Overview
 
-If you prefer to set things up manually, follow these steps:
+### What This Setup Provides
 
-### 1. Clone the Official MusicBrainz Docker Repository
+- **Full MusicBrainz Mirror**: Complete read-only replica of the MusicBrainz database
+- **HTTPS with Cloudflare**: Origin Certificates valid for 15 years
+- **High Performance**: Optimized for 64GB RAM / 16-core / NVMe storage
+- **Security Hardened**: UFW firewall, restricted ports, HSTS enabled
+- **Gzip Compression**: Automatic compression for text-based responses
+- **Automatic Cache Warming**: PostgreSQL pg_prewarm for fast restarts
+
+### Architecture
+
+```
+Internet → Cloudflare
+        → Origin Server (ports 80, 443)
+        → nginx (HTTPS, gzip, rate limiting)
+        → MusicBrainz App (40 workers)
+        → PostgreSQL 16 (8GB shared_buffers)
+        → Solr Search (12GB heap)
+```
+
+### Current Configuration
+
+- **Domain**: `musicbrainz-mirror.music-assistant.io`
+- **Server**: Ubuntu with Docker
+
+---
+
+## Hardware Requirements
+
+### Current OHF Setup
+- **CPU**: 16 cores
+- **RAM**: 64GB
+- **Storage**: 1TB NVMe RAID 1
+- **Network**: 1Gbps
+
+---
+
+## Quick Start
+
+### One-liner Bootstrap
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OpenHomeFoundation/musicbrainz-docker-local/main/bootstrap.sh | bash
+# OR
+wget -qO- https://raw.githubusercontent.com/OpenHomeFoundation/musicbrainz-docker-local/main/bootstrap.sh | bash
+```
+
+### Manual Setup
+
+#### 1. Clone the Official Repository
 
 ```bash
 git clone https://github.com/metabrainz/musicbrainz-docker.git
 cd musicbrainz-docker
 ```
 
-**Recommended:** Use a specific release for stability:
-```bash
-# Check available releases at:
-# https://github.com/metabrainz/musicbrainz-docker/releases
-
-# Clone and checkout a specific version
-git clone https://github.com/metabrainz/musicbrainz-docker.git
-cd musicbrainz-docker
-git checkout v-2026-01-19.0
-```
-
-### 2. Download This Local Folder
-
-Download or copy this entire `local` folder into the `musicbrainz-docker` directory you just cloned:
+#### 2. Add This Local Folder
 
 ```bash
-# Option A: If you have this repo as a zip/tarball
-cp -r /path/to/this/local ./local
-
-# Option B: If this is hosted in a separate git repo
 git clone https://github.com/OpenHomeFoundation/musicbrainz-docker-local local
 ```
 
-Your directory structure should look like:
-```
-musicbrainz-docker/
-├── docker-compose.yml      # From official repo
-├── compose/                # From official repo
-├── .env                    # You will create/edit this
-└── local/                  # THIS folder (added by you)
-    ├── README.md
-    ├── install.sh
-    ├── docker-compose.ohf.yml
-    └── config/
-```
+#### 3. Create Cloudflare Origin Certificate
 
-### 3. Configure Environment
+1. Go to **Cloudflare Dashboard** → **SSL/TLS** → **Origin Server**
+2. Click **Create Certificate**
+3. Select "Generate private key and CSR with Cloudflare"
+4. Add your domain(s)
+5. Choose validity
+6. Copy the **Origin Certificate** and **Private Key** and save them as `cert.pem` and `key.pem`.
 
-Edit the `.env` file in the **musicbrainz-docker root directory** (not this local folder):
+#### 4. Configure Environment
+
+Base64 encode your certificates:
 
 ```bash
-# Required settings
-MUSICBRAINZ_DOMAIN=your-domain.com
-LETSENCRYPT_EMAIL=your-email@example.com
-MUSICBRAINZ_WEB_SERVER_HOST=your-domain.com
+# Linux:
+cat cert.pem | base64 -w0
+cat key.pem | base64 -w0
+
+# macOS:
+cat cert.pem | base64 | tr -d '\n'
+cat key.pem | base64 | tr -d '\n'
+```
+
+Edit `.env` in the musicbrainz-docker root:
+
+```bash
+MUSICBRAINZ_DOMAIN=musicbrainz-mirror.music-assistant.io
+MUSICBRAINZ_WEB_SERVER_HOST=musicbrainz-mirror.music-assistant.io
 MUSICBRAINZ_WEB_SERVER_PORT=443
 
-# Compose file chain (enables all features)
-COMPOSE_FILE=docker-compose.yml:compose/replication-cron.yml:local/docker-compose.ohf.yml
+# SSL Certificate (Base64 encoded - single line each)
+SSL_CERTIFICATE_BASE64=LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t...
+SSL_CERTIFICATE_KEY_BASE64=LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t...
+
+# Enable basic compose fules -- follow original readme procedure to enable replication cron (which updates this line)
+COMPOSE_FILE=docker-compose.yml:local/docker-compose.ohf.yml
 ```
 
-### 4. Point DNS
+#### 5. Configure Cloudflare SSL Mode
 
-Create an A record pointing your domain to your server's IP address.
+In Cloudflare Dashboard → SSL/TLS:
+- Set SSL mode to **Full (strict)**
 
-### 5. Run the Installation Script
+#### 6. Start Services
 
-```bash
-sudo ./local/install.sh
-```
-
-This script will:
-- Configure the UFW firewall (SSH, HTTP, HTTPS only)
-- Apply system performance optimizations
-- Verify Docker installation
-- Create required directories
-- Optionally set up cron jobs for search index rebuilding
-- Start all services
-
-### 6. Verify Deployment
-
-```bash
-# Check service status
-docker compose ps
-
-# Watch certificate generation (takes 30-60 seconds)
-docker logs acme-companion -f
-
-# Once certificate is ready, access your site
-https://your-domain.com
-```
-
-## File Structure
-
-```
-local/
-├── README.md                    # This file
-├── install.sh                   # Automated installation script
-├── docker-compose.ohf.yml       # Docker Compose override with optimizations
-├── config/
-│   └── nginx/
-│       └── custom.conf          # Nginx gzip compression settings
-├── OHF_SETUP.md                 # Detailed setup guide for Open Home Foundation
-└── HTTPS_SETUP.md.old           # Legacy HTTPS documentation (reference)
-```
-
-## Services
-
-| Service | Purpose | Notes |
-|---------|---------|-------|
-| **db** | PostgreSQL 16 database | Stores all MusicBrainz data |
-| **musicbrainz** | Web application | The main MusicBrainz server |
-| **search** | Solr search engine | Powers artist/release search |
-| **mq** | RabbitMQ message queue | Handles inter-service events |
-| **redis** | Session cache | Fast in-memory caching |
-| **nginx-proxy** | Reverse proxy | HTTPS termination, routing |
-| **acme-companion** | Let's Encrypt client | Auto-renews SSL certificates |
-
-## Common Operations
-
-### Start Services
 ```bash
 docker compose up -d
 ```
 
-### Stop Services
+---
+
+## Server Preparation
+
+### 1. Initial System Setup
+
+Execute `install.sh` to prepare the server(Only ubuntu supported):
+
+
+---
+
+## Configuration
+
+### 1. Create Cloudflare Origin Certificate
+
+1. Go to **Cloudflare Dashboard** → **SSL/TLS** → **Origin Server**
+2. Click **Create Certificate**
+3. Select "Generate private key and CSR with Cloudflare"
+4. Add your domain(s)
+5. Choose validity: **15 years**
+6. Copy the **Origin Certificate** and **Private Key**
+
+Save them as `cert.pem` and `key.pem`.
+
+### 2. Configure Environment (.env)
+
+Base64 encode your certificates (required for Docker Compose):
+
 ```bash
-docker compose down
+# On Linux:
+cat cert.pem | base64 -w0 > cert.b64
+cat key.pem | base64 -w0 > key.b64
+
+# On macOS:
+cat cert.pem | base64 | tr -d '\n' > cert.b64
+cat key.pem | base64 | tr -d '\n' > key.b64
 ```
 
-### View Logs
-```bash
-# All services
-docker compose logs -f
+Then create your `.env` file:
 
-# Specific service
+```bash
+cat > .env << 'EOF'
+# Domain Configuration
+MUSICBRAINZ_DOMAIN=musicbrainz-mirror.music-assistant.io
+MUSICBRAINZ_WEB_SERVER_HOST=musicbrainz-mirror.music-assistant.io
+MUSICBRAINZ_WEB_SERVER_PORT=443
+
+# SSL Certificate (Base64 encoded - single line each)
+# (Optional) if ommited, the default self-signed cert will be used
+SSL_CERTIFICATE_BASE64=<paste contents of cert.b64>
+SSL_CERTIFICATE_KEY_BASE64=<paste contents of key.b64>
+
+# Compose Configuration
+COMPOSE_FILE=docker-compose.yml:local/docker-compose.ohf.yml
+EOF
+```
+
+### Key Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `.env` | Domain, certificates, compose chain |
+| `local/docker-compose.ohf.yml` | PostgreSQL, Solr, Redis, nginx optimizations |
+| `local/config/nginx/nginx.conf.template` | Nginx configuration template |
+
+---
+
+## Deployment
+
+### Initial Deployment
+
+```bash
+cd ~/musicbrainz-docker
+
+# Start all services
+docker compose up -d
+
+# Monitor startup
+docker compose ps
+docker compose logs -f nginx
+docker compose logs -f musicbrainz
+```
+
+### Verify HTTPS Certificate
+
+```bash
+# Check certificate is loaded
+docker exec nginx cat /etc/nginx/ssl/fullchain.pem | openssl x509 -noout -dates
+
+# Test HTTPS
+curl -k https://localhost/health
+```
+
+### DNS Verification
+
+```bash
+# Verify DNS points to Cloudflare
+dig +short musicbrainz-mirror.music-assistant.io
+```
+
+---
+
+## Monitoring & Maintenance
+
+### Container Status
+
+```bash
+# View all containers
+docker compose ps
+
+# Check resource usage
+docker stats
+
+# View logs
+docker compose logs -f nginx
 docker compose logs -f musicbrainz
 docker compose logs -f db
 ```
 
-### Check Service Status
+### Database Status
+
 ```bash
-docker compose ps
+# Check database size
+docker compose exec db psql -U musicbrainz musicbrainz_db -c \
+  "SELECT pg_size_pretty(pg_database_size(current_database()));"
+
+# Check replication status
+docker compose exec db psql -U musicbrainz musicbrainz_db -c \
+  "SELECT * FROM replication_control;"
+
+# View table sizes
+docker compose exec db psql -U musicbrainz musicbrainz_db -c \
+  "SELECT schemaname, tablename, pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+   FROM pg_tables WHERE schemaname = 'musicbrainz' ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC LIMIT 10;"
 ```
 
-### Restart a Service
+### Memory Usage
+
 ```bash
-docker compose restart musicbrainz
+# System memory
+free -h
+
+# Container memory
+docker stats --no-stream --format 'table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}'
 ```
 
-### Rebuild Search Index
-```bash
-docker compose exec musicbrainz indexer.sh
-```
+---
 
-### Force Database Replication
-```bash
-docker compose exec musicbrainz replication.sh
-```
-
-### View SSL Certificate Status
-```bash
-docker compose exec nginx-proxy ls -la /etc/nginx/certs/
-```
-
-## Configuration Details
-
-### docker-compose.ohf.yml
-
-This file overrides the default configuration with:
-
-**PostgreSQL Optimizations:**
-- 8GB shared_buffers
-- 40GB effective_cache_size
-- pg_prewarm enabled (cache warming on restart)
-- Parallel query workers
-
-**Application Optimizations:**
-- 24 worker processes
-- Optimized for I/O-bound workloads
-
-**Solr Optimizations:**
-- 8GB heap size
-- Memory swapping disabled
-
-**Redis:**
-- Upgraded to Redis 7
-- 2GB max memory with LRU eviction
-
-### Nginx Custom Configuration
-
-Located at `config/nginx/custom.conf`:
-- Gzip compression enabled (level 6)
-- Compresses text, CSS, JavaScript, JSON, XML, SVG
-- Minimum size threshold: 1000 bytes
 
 ## Troubleshooting
 
-### Services Won't Start
+### Common Issues
+
+#### 1. 502 Bad Gateway
+
+**Cause**: MusicBrainz container not ready or crashed
 
 ```bash
-# Check for port conflicts
-sudo lsof -i :80
-sudo lsof -i :443
-
-# View startup errors
-docker compose logs --tail=50
+docker compose ps
+docker compose logs musicbrainz --tail 50
+docker compose restart musicbrainz
 ```
 
-### Certificate Issues
+#### 2. SSL Certificate Error
+
+**Cause**: Certificate not written or invalid
 
 ```bash
-# Check acme-companion logs
-docker compose logs acme-companion
+# Check certificate exists
+docker exec nginx ls -la /etc/nginx/ssl/
 
-# Verify domain resolves correctly
-dig your-domain.com
+# Check certificate content
+docker exec nginx cat /etc/nginx/ssl/fullchain.pem | openssl x509 -noout -text
 
-# Force certificate renewal
-docker compose exec acme-companion /app/force_renew
+# Check nginx logs
+docker compose logs nginx
 ```
 
-### Database Issues
+#### 3. Port :5000 in URLs
+
+**Cause**: `MUSICBRAINZ_WEB_SERVER_PORT` not set to 443
 
 ```bash
-# Check database logs
+# Verify .env
+grep WEB_SERVER_PORT .env
+
+# Recreate container
+docker compose up -d --force-recreate musicbrainz
+```
+
+#### 4. Database Connection Errors
+
+```bash
+# Check PostgreSQL logs
 docker compose logs db
 
-# Connect to database
-docker compose exec db psql -U musicbrainz
+# Verify database is running
+docker compose exec db psql -U musicbrainz -c "SELECT version();"
+
+# Check connections
+docker compose exec db psql -U musicbrainz -c "SELECT count(*) FROM pg_stat_activity;"
 ```
 
-### High Memory Usage
+### Log Locations
 
 ```bash
-# Check container memory usage
-docker stats
+# nginx logs
+docker compose logs nginx
 
-# Reduce PostgreSQL memory (edit docker-compose.ohf.yml)
-# Lower shared_buffers and effective_cache_size values
-```
+# MusicBrainz application logs
+docker compose logs musicbrainz
 
-### Search Not Working
+# PostgreSQL logs
+docker compose logs db
 
-```bash
-# Check Solr status
+# Solr search logs
 docker compose logs search
 
-# Rebuild search index (takes several hours)
-docker compose exec musicbrainz indexer.sh
+# All logs
+docker compose logs --tail=100 -f
 ```
 
-## Updating
-
-### Pull Latest Changes
-
-```bash
-cd musicbrainz-docker
-git pull origin main
-docker compose pull
-docker compose up -d
-```
-
-### Rebuild Containers
-
-```bash
-docker compose build --no-cache
-docker compose up -d
-```
+---
 
 ## Backup & Recovery
 
 ### Backup Database
 
 ```bash
-docker compose exec db pg_dump -U musicbrainz musicbrainz_db > backup.sql
-```
-
-### Backup Certificates
-
-```bash
-# Important: Back up your SSL certificates
-docker run --rm -v musicbrainz-docker_nginx-certs:/certs -v $(pwd):/backup \
-  alpine tar czf /backup/certs-backup.tar.gz -C /certs .
+docker compose exec db pg_dump -U musicbrainz musicbrainz_db | \
+  gzip > musicbrainz-db-backup-$(date +%Y%m%d).sql.gz
 ```
 
 ### Restore Database
 
 ```bash
-docker compose exec -T db psql -U musicbrainz musicbrainz_db < backup.sql
+gunzip -c musicbrainz-db-backup-YYYYMMDD.sql.gz | \
+  docker compose exec -T db psql -U musicbrainz musicbrainz_db
 ```
 
-## Development Mode (No HTTPS)
+---
 
-For local development without HTTPS, you can bypass nginx-proxy:
+## Updating
 
-1. Comment the ports section for musicbrainz to expose port 5000 directly
-2. Restart services:
-   ```bash
-   docker compose down
-   docker compose up -d
-   ```
-3. Access via `http://localhost:5000`
+### Update MusicBrainz Images
 
-## Additional Resources
+```bash
+cd ~/musicbrainz-docker
 
-- [MusicBrainz Docker GitHub](https://github.com/metabrainz/musicbrainz-docker)
-- [MusicBrainz Documentation](https://musicbrainz.org/doc/MusicBrainz_Documentation)
-- [MusicBrainz Database](https://musicbrainz.org/doc/MusicBrainz_Database)
-- [Open Home Foundation Setup Guide](OHF_SETUP.md) - Detailed hardware-specific guide
+git pull origin main
 
-## Support
+# Pull latest images
+docker compose pull
 
-For issues specific to this setup, check:
-1. [OHF_SETUP.md](OHF_SETUP.md) troubleshooting section
-2. [MusicBrainz Docker Issues](https://github.com/metabrainz/musicbrainz-docker/issues)
-3. [MusicBrainz Forums](https://community.metabrainz.org/)
+# Recreate containers
+docker compose up -d
+
+# Clean up old images
+docker image prune -f
+```
+
+---
+
+
+## Support & Resources
+
+### MusicBrainz Resources
+- [MusicBrainz Mirror Documentation](https://musicbrainz.org/doc/MusicBrainz_Server/Setup#Replication)
+- [Docker Setup Guide](https://github.com/metabrainz/musicbrainz-docker)
+- [MusicBrainz Community](https://community.metabrainz.org/)
+
+### Cloudflare Resources
+- [Origin Certificates](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/)
+- [SSL Modes](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/)
+
+### Issues
+- [MusicBrainz Docker Issues](https://github.com/metabrainz/musicbrainz-docker/issues)
+
+---
+
+**Last Updated**: 2026-02-03
+**Maintained By**: Open Home Foundation

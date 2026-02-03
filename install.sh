@@ -46,7 +46,7 @@ echo "Configuring firewall rules..."
 ufw --force default deny incoming
 ufw --force default allow outgoing
 ufw --force allow 22/tcp comment 'SSH access'
-ufw --force allow 80/tcp comment 'HTTP (required for Let'\''s Encrypt)'
+ufw --force allow 80/tcp comment 'HTTP (redirects to HTTPS)'
 ufw --force allow 443/tcp comment 'HTTPS traffic'
 
 # Enable UFW if not already enabled
@@ -172,9 +172,8 @@ echo "================================================="
 if [ ! -f "$INSTALL_DIR/.env" ]; then
     echo "⚠️  Warning: .env file not found in $INSTALL_DIR"
     echo "   Please ensure you have:"
-    echo "   - .env file with MUSICBRAINZ_DOMAIN and LETSENCRYPT_EMAIL"
-    echo "   - docker-compose.override.yml with your optimizations"
-    echo "   - local/config/nginx/custom.conf for gzip compression"
+    echo "   - .env file with MUSICBRAINZ_DOMAIN, SSL_CERTIFICATE_BASE64, SSL_CERTIFICATE_KEY_BASE64"
+    echo "   - COMPOSE_FILE set to include local/docker-compose.ohf.yml"
     echo ""
     read -p "Continue anyway? (y/n) " -n 1 -r
     echo
@@ -192,8 +191,9 @@ else
         echo "✓ Domain configured: $DOMAIN"
     fi
 
-    if ! grep -q "LETSENCRYPT_EMAIL=" "$INSTALL_DIR/.env"; then
-        echo "⚠️  Warning: LETSENCRYPT_EMAIL not set in .env"
+    if ! grep -q "SSL_CERTIFICATE_BASE64=" "$INSTALL_DIR/.env"; then
+        echo "⚠️  Warning: SSL_CERTIFICATE_BASE64 not set in .env"
+        echo "   Base64 encode your certificate: cat cert.pem | base64 -w0"
     fi
 fi
 
@@ -253,9 +253,9 @@ echo "To check status:"
 echo "  docker compose ps"
 echo ""
 echo "To view logs:"
-echo "  docker logs nginx-proxy -f"
-echo "  docker logs acme-companion -f"
-echo "  docker logs musicbrainz-docker-musicbrainz-1 -f"
+echo "  docker compose logs nginx -f"
+echo "  docker compose logs musicbrainz -f"
+echo "  docker compose logs db -f"
 echo ""
 
 read -p "Would you like to start the services now? (y/n) " -n 1 -r
@@ -289,10 +289,9 @@ echo "  ✓ Docker verified"
 echo "  ✓ Directory structure created"
 echo ""
 echo "Next steps:"
-echo "  1. Verify your domain DNS points to this server"
-echo "  2. Monitor certificate generation: docker logs acme-companion -f"
+echo "  1. Ensure your domain DNS points to your server"
+echo "  2. Verify HTTPS: curl -k https://localhost/health"
 echo "  3. Access your site: https://$DOMAIN"
-echo "  4. Optional: Run cache warm-up: ./local/warm-cache.sh"
 echo ""
 echo "For troubleshooting, see: TROUBLESHOOTING.md"
 echo ""

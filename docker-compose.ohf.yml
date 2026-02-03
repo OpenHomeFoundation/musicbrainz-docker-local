@@ -20,7 +20,7 @@ services:
       -c default_statistics_target=500
       -c random_page_cost=1.1
       -c effective_io_concurrency=200
-      -c work_mem=64MB
+      -c work_mem=128MB
       -c min_wal_size=2GB
       -c max_wal_size=8GB
       -c max_worker_processes=16
@@ -71,11 +71,11 @@ services:
     #   - NVMe RAID 1 can handle hundreds of concurrent ops
     #   - Enables parallel bitmap heap scans
     #
-    # work_mem=64MB (default: 4MB)
+    # work_mem=128MB (default: 4MB)
     #   - Memory per query operation (sort, hash join, etc.)
+    #   - MusicBrainz has complex queries with many JOINs that benefit from more memory
     #   - Formula: (Available RAM * 0.25) / (max_connections * 2-3)
-    #   - With ~20GB for queries and default 100 connections: ~100MB is safe
-    #   - Conservative 64MB prevents OOM on many simultaneous complex queries
+    #   - With 64GB RAM and 100 connections: 128MB is safe and improves sort/join performance
     #
     # min_wal_size=2GB, max_wal_size=8GB (defaults: 80MB, 1GB)
     #   - Controls WAL size and checkpoint frequency
@@ -122,47 +122,41 @@ services:
     ports: !override
       - 99
 
+    # Health check to detect hung workers and auto-restart
+    # Checks if the server responds to HTTP requests
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "--max-time", "10", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+    # ↑ Health check configuration:
+    # - test: Curl the root URL with 10s timeout (fails if workers hung)
+    # - interval: Check every 30 seconds
+    # - timeout: Fail if check takes >15 seconds
+    # - retries: 3 consecutive failures = unhealthy
+    # - start_period: Wait 2 minutes for initial startup before checking
+
     environment:
-      - MUSICBRAINZ_SERVER_PROCESSES=24
+      - MUSICBRAINZ_SERVER_PROCESSES=40
       # ↑ Plackup worker processes (increased from default 10)
       # Each process handles one HTTP request at a time
-      # Formula: CPU_cores * 1.5 to 2.5 (depending on I/O vs CPU workload)
+      # Formula: CPU_cores * 2.5 to 5 (for I/O-bound workloads with lots of RAM)
       # MusicBrainz is I/O-bound (waiting on database queries)
-      # With 16 cores: 24 processes = 1.5 processes per core
-      # This provides good concurrency without excessive context switching
-      # Each process uses ~150-250MB RAM, so 24 * 200MB ≈ 5GB
+      # With 16 threads and 64GB RAM: 40 workers = 2.5 per thread
+      # Each worker ~500MB under load, so 40 × 500MB = 20GB (49GB available)
+      # This allows handling more concurrent slow requests without saturation
 
-      # Nginx-proxy configuration
-      # These environment variables are read by nginx-proxy and acme-companion containers
-      # via Docker socket to automatically configure reverse proxy and SSL certificates
-      - VIRTUAL_HOST=${MUSICBRAINZ_DOMAIN:-musicbrainz.local}
-      # ↑ Tells nginx-proxy which domain(s) to route to this container
-      - VIRTUAL_PORT=5000
-      # ↑ Tells nginx-proxy which port inside the container to proxy to
-      - LETSENCRYPT_HOST=${MUSICBRAINZ_DOMAIN:-musicbrainz.local}
-      # ↑ Tells acme-companion to request Let's Encrypt SSL certificate for this domain
-      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL:-admin@example.com}
-      # ↑ Email for Let's Encrypt certificate expiration notifications
       - REPLICATION_TYPE=RT_SLAVE
       # ↑ Tells MusicBrainz server this is a mirror, not the main server
 
   search:
     environment:
-      - SOLR_HEAP=8g
-      # ↑ Java heap for Solr (increased from 2g to 8g = 4x default)
+      - SOLR_HEAP=12g
+      # ↑ Java heap for Solr (increased from 2g to 12g = 6x default)
       # Solr keeps search indexes in Java heap for fast lookups
       # Rule: Set heap to 50-75% of container RAM allocation
-      # With 12GB allocated to container: 8GB heap + 4GB for OS file cache
-      #
-      # Why not more?
-      # - Java heap >31GB loses compressed pointers (huge performance hit)
-      # - Leaving RAM outside heap for OS cache is critical for Lucene
-      # - Lucene indexes are mmap'd files - OS cache is often faster than heap
-      #
-      # Why 8GB specifically?
-      # - MusicBrainz full database = ~40GB indexes uncompressed
-      # - Hot data (frequently searched artists/releases) fits in 8GB
-      # - Cold data served from OS file cache (the other 4GB + system cache)
+      # With 64GB system RAM: 12GB heap leaves plenty for OS file cache
 
       - LOG4J_FORMAT_MSG_NO_LOOKUPS=true
       # ↑ Security mitigation for Log4Shell vulnerability (CVE-2021-44228)
@@ -205,78 +199,57 @@ services:
     #   - If Redis crashes, users just need to log in again (acceptable)
 
   # ============================================================================
-  # HTTPS/SSL Configuration with Nginx Reverse Proxy and Let's Encrypt
+  # HTTPS/SSL Configuration with Nginx
   # ============================================================================
+  # Certificates are injected via base64-encoded environment variables
 
-  nginx-proxy:
-    image: nginxproxy/nginx-proxy:latest
-    container_name: nginx-proxy
+  nginx:
+    image: nginx
+    container_name: nginx
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - /var/run/docker.sock:/tmp/docker.sock:ro
-      # ↑ Docker socket access to auto-discover containers
-      - nginx-certs:/etc/nginx/certs:ro
-      # ↑ SSL certificates (read-only, managed by acme-companion)
-      - nginx-vhost:/etc/nginx/vhost.d
-      # ↑ Virtual host configurations
-      - nginx-html:/usr/share/nginx/html
-      # ↑ Web root for ACME challenges and default pages
-      - nginx-dhparam:/etc/nginx/dhparam
-      # ↑ Diffie-Hellman parameters for stronger SSL
-      - ./local/config/nginx/custom.conf:/etc/nginx/conf.d/custom.conf:ro
-      # ↑ Custom nginx configuration for gzip compression
+      - ./local/config/nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
     environment:
-      - DEFAULT_HOST=${MUSICBRAINZ_DOMAIN:-musicbrainz.local}
-      # ↑ Default virtual host to serve
-      - ENABLE_IPV6=true
-      # ↑ Enable IPv6 support
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "10"
-    labels:
-      - "com.github.jrcs.letsencrypt_nginx_proxy_companion.nginx_proxy"
-      # ↑ Label for acme-companion to identify the nginx-proxy container
+      - MUSICBRAINZ_DOMAIN=${MUSICBRAINZ_DOMAIN:-musicbrainz.local}
+      - SSL_CERTIFICATE_BASE64=${SSL_CERTIFICATE_BASE64:-}
+      - SSL_CERTIFICATE_KEY_BASE64=${SSL_CERTIFICATE_KEY_BASE64:-}
+      # ↑ SSL Certificate and Private Key (base64 encoded)
+      # Encode with: cat cert.pem | base64 -w0
+    command:
+      - /bin/sh
+      - -c
+      - |
+        CERT_DIR="/etc/nginx/ssl"
+        mkdir -p "$$CERT_DIR"
 
-  acme-companion:
-    image: nginxproxy/acme-companion:latest
-    container_name: acme-companion
-    restart: unless-stopped
+        # Write certificates from base64-encoded environment variables
+        if [ -n "$$SSL_CERTIFICATE_BASE64" ] && [ -n "$$SSL_CERTIFICATE_KEY_BASE64" ]; then
+          echo "Decoding and writing SSL certificate..."
+          echo "$$SSL_CERTIFICATE_BASE64" | base64 -d > "$$CERT_DIR/fullchain.pem"
+          echo "$$SSL_CERTIFICATE_KEY_BASE64" | base64 -d > "$$CERT_DIR/privkey.pem"
+          chmod 600 "$$CERT_DIR/privkey.pem"
+          echo "Certificate written successfully"
+        else
+          echo "WARNING: SSL_CERTIFICATE_BASE64 or SSL_CERTIFICATE_KEY_BASE64 not set"
+          echo "Creating self-signed certificate for development..."
+          openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout "$$CERT_DIR/privkey.pem" \
+            -out "$$CERT_DIR/fullchain.pem" \
+            -subj "/CN=$$MUSICBRAINZ_DOMAIN" 2>/dev/null
+        fi
+
+        # Generate nginx config from template
+        envsubst '$$MUSICBRAINZ_DOMAIN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+
+        # Start nginx in foreground
+        exec nginx -g 'daemon off;'
     depends_on:
-      - nginx-proxy
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # ↑ Docker socket access to monitor containers
-      - nginx-certs:/etc/nginx/certs
-      # ↑ SSL certificates (read-write, this container manages them)
-      - nginx-vhost:/etc/nginx/vhost.d
-      # ↑ Virtual host configurations for ACME challenges
-      - nginx-html:/usr/share/nginx/html
-      # ↑ Web root for ACME HTTP-01 challenges
-      - acme-state:/etc/acme.sh
-      # ↑ acme.sh state and account data
-    environment:
-      - DEFAULT_EMAIL=${LETSENCRYPT_EMAIL:-admin@example.com}
-      # ↑ Default email for Let's Encrypt notifications
+      - musicbrainz
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "10"
-
-# Additional volumes for nginx and SSL certificates
-volumes:
-  nginx-certs:
-    driver: local
-  nginx-vhost:
-    driver: local
-  nginx-html:
-    driver: local
-  nginx-dhparam:
-    driver: local
-  acme-state:
-    driver: local
